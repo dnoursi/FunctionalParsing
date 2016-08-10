@@ -1,13 +1,19 @@
 {- The basic functionality of a hypothetical RPN calculator with infinite stack -}
 
-module Calc (Calculation,kEnter,kAdd,kSub,kMul,kDiv,kSqrt,kSwap,kDup,perform) where
+module Main where
 
-import State
+import Control.Monad.State
+import Data.Char
+import Data.List (intercalate)
+import System.IO
+import Text.Regex.Posix
 
-data InternalState = InternalState
-	{ stack :: [Double]
-	, memory :: Double
-	}
+{- type declarations -}
+
+data InternalState = InternalState {
+    stack :: [Double],
+    memory :: Double
+}
 
 type CalcState = State InternalState
 
@@ -21,61 +27,124 @@ pop = state $ \st -> case stack st of
 push :: Double -> CalcState ()
 push d = modify  $ \st -> st { stack = d : stack st }
 
-unOp :: (Double -> Double) -> CalcState ()
-unOp op = do
+unop :: (Double -> Double) -> CalcState ()
+unop op = do
     x <- pop
     push $ op x
 
-binOp :: (Double -> Double -> Double) -> CalcState ()
-binOp op = do
+binop :: (Double -> Double -> Double) -> CalcState ()
+binop op = do
     y <- pop
     x <- pop
     push $ op x y
 
-{- exported types  -}
+{- exported calculator operations -}
 
-type Calculation = CalcState ()
+kEnter :: Double -> CalcState ()
+kEnter = push
 
-{- exported calculations -}
+kAdd, kSub, kMul, kDiv :: CalcState ()
+kAdd = binop (+)
+kSub = binop (-)
+kMul = binop (*)
+kDiv = binop (/)
 
-kAdd, kSub, kMul, kDiv :: Calculation
-kAdd = binOp (+)
-kSub = binOp (-)
-kMul = binOp (*)
-kDiv = binOp (/)
 
-kSqrt :: Calculation
-kSqrt = unOp sqrt
+kSqrt :: CalcState ()
+kSqrt = unop sqrt
 
-kSin,kCos,kTan :: Calculation
-kSin = unOp sin
-kCos = unOp cos
-kTan = unOp tan
+kSin,kCos,kTan :: CalcState ()
+kSin = unop sin
+kCos = unop cos
+kTan = unop tan
+
+kNeg :: CalcState ()
+kNeg = unop negate
 
 {- exported stack operations -}
 
-kEnter :: Double -> Calculation
-kEnter = push
-
-kSwap :: Calculation
+kSwap :: CalcState ()
 kSwap = do
     y <- pop
     x <- pop
     push y
     push x
 
-kDup :: Calculation
+kDup :: CalcState ()
 kDup = do
     x <- pop
     push x
     push x
 
-{- execution of a calculator program -}
+kClear :: CalcState ()
+kClear = modify $ \s -> s { stack = [] }
 
-perform :: Calculation -> Double
-perform ma = evalState (ma >> pop) startState where
-    startState = InternalState { stack = [], memory = 0.0 }
-    
+{- IO -}
+
+type IOCalcState = StateT InternalState IO
+
+while :: Monad m => m Bool -> m ()
+while action = loop where
+	loop = do
+		continue <- action
+		when continue loop
+
+printState :: IOCalcState ()
+printState = do
+	state <- get
+	liftIO $ do
+		putStrLn $ "s = " ++ (intercalate " " $ map show $ stack state)
+		putStrLn $ "m = " ++ show (memory state)
+
+runCommands :: [String] -> IOCalcState Bool
+runCommands [] = return True
+runCommands (c:cs)
+	| c =~ "^-?[0-9]+([.][0-9]*)?([eE]-?[0-9]+)?$" = run $ kEnter (read c)
+	| c == "+" = run kAdd
+	| c == "-" = run kSub
+	| c == "*" = run kMul
+	| c == "/" = run kDiv
+	| c == "sin" = run kSin
+	| c == "cos" = run kCos
+	| c == "tan" = run kTan
+	| c == "sqrt" = run kSqrt
+	| c == "+/-" = run kNeg
+	| c == "swap" = run kSwap
+	| c == "dup" = run kDup
+	| c == "c" = run kClear
+	| c == "p" = printState >> runCommands cs
+	| c == "q" = return False
+    | c == "s" = run kSto
+    | c == "r" = run kRcl
+	| otherwise = do
+		liftIO $ do
+			putStrLn $ "unrecognized command: " ++ c
+			putStrLn $ "commands not executed: " ++ show cs
+		return True
+	where
+		run cmd = shift cmd >> runCommands cs
+		shift = state . runState
+
 store = modify $ \st -> st{ stack=stack st, memory = head $ stack st}
-recall = modify $ \st -> st{ stack = ((memory st) : (stack st)) , memory = 0.0}
+kSto = store
+kRcl = gets memory
 
+repl :: IOCalcState ()
+repl = while $ do
+	liftIO $ putStr ": " >> hFlush stdout
+	commands <- liftIO (fmap words getLine)
+	runCommands commands
+
+startState :: InternalState
+startState = InternalState { stack = [], memory = 0.0 }
+
+withInputBuffering :: MonadIO m => BufferMode -> m a -> m a
+withInputBuffering mode action = do
+    savedMode <- liftIO $ hGetBuffering stdin
+    liftIO $ hSetBuffering stdin mode
+    result <- action
+    liftIO $ hSetBuffering stdin savedMode
+    return result
+
+main :: IO ()
+main = 	void $ withInputBuffering LineBuffering $ runStateT repl startState
